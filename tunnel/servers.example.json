@@ -9,6 +9,15 @@
       "forwards": [
         {"local": 8080, "remote": 8080}
       ]
+    },
+    {
+      "name": "이 PC (로컬)",
+      "host": "127.0.0.1",
+      "local": true,
+      "enabled": true,
+      "forwards": [
+        {"local": 8081, "remote": 8081}
+      ]
     }
   ]
 }

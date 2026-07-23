@@ -1,0 +1,29 @@
+# 이 파일을 docker-compose.yml로 복사한 뒤 경로/GPU 설정을 환경에 맞게 수정하세요.
+# cp docker-compose.example.yml docker-compose.yml
+services:
+  dashboard:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"     # 로컬에서만 접근 — 원격 접속은 tunnel/tunnel.py로 SSH 포워딩
+    environment:
+      DASH_CODE_DIR: /code               # train.py가 있는 디렉토리
+      DASH_EXP_DIR: /experiments         # training_{N} 출력 디렉토리들의 상위
+      DASH_TORCHRUN: /opt/train_env/bin/torchrun
+      DASH_GPUS: "0,1,2"                 # CUDA_VISIBLE_DEVICES
+      DASH_PORT: "8080"
+    volumes:
+      - /path/to/train_code:/code
+      - /path/to/experiments:/experiments
+      - /path/to/conda_env:/opt/train_env:ro
+    # GPU 전달 (docker compose v2 / Compose Spec 기준). nvidia-container-toolkit 설치 필요.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # 구버전 docker-compose(v1)를 쓴다면 위 deploy 블록 대신 아래 두 줄 사용:
+    # runtime: nvidia
+    # environment: { NVIDIA_VISIBLE_DEVICES: all }

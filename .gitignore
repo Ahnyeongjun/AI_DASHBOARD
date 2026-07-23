@@ -4,5 +4,6 @@ runner_state.json
 .queue.lock
 *.log
 start_ui.sh
+docker-compose.yml
 tunnel/servers.json
 __pycache__/

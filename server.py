@@ -1,14 +1,15 @@
-"""학습 큐 모니터링/관리 웹 서버 (stdlib only, 127.0.0.1 전용).
+"""학습 큐 모니터링/관리 웹 서버 (FastAPI, 127.0.0.1 전용).
 
 GET  /            — 대시보드 HTML
 GET  /api/status  — GPU, 실행 중 학습(로그 파싱), 큐, 히스토리, 러너 상태
 POST /api/action  — {action: pause|resume|remove|move_up|move_down|add, ...}
 """
-import json
 import os
 import sys
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qlib
@@ -16,6 +17,8 @@ import qlib
 PORT = int(os.environ.get('DASH_PORT', '8080'))
 BIND = os.environ.get('DASH_BIND', '127.0.0.1')  # LAN 공개 시 0.0.0.0
 INDEX = os.path.join(qlib.BASE, 'index.html')
+
+app = FastAPI()
 
 
 def status():
@@ -78,40 +81,28 @@ def do_action(body):
     return {'ok': True}
 
 
-class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype='application/json'):
-        data = body if isinstance(body, bytes) else json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header('Content-Type', ctype)
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+@app.get('/')
+@app.get('/index')
+@app.get('/index.html')
+def index():
+    return FileResponse(INDEX, media_type='text/html; charset=utf-8')
 
-    def do_GET(self):
-        if self.path == '/' or self.path.startswith('/index'):
-            with open(INDEX, 'rb') as f:
-                self._send(200, f.read(), 'text/html; charset=utf-8')
-        elif self.path == '/api/status':
-            self._send(200, status())
-        else:
-            self._send(404, {'error': 'not found'})
 
-    def do_POST(self):
-        if self.path == '/api/action':
-            n = int(self.headers.get('Content-Length', 0))
-            try:
-                body = json.loads(self.rfile.read(n) or b'{}')
-                self._send(200, do_action(body))
-            except Exception as e:
-                self._send(400, {'ok': False, 'error': repr(e)})
-        else:
-            self._send(404, {'error': 'not found'})
+@app.get('/api/status')
+def api_status():
+    return status()
 
-    def log_message(self, *a):
-        pass
+
+@app.post('/api/action')
+async def api_action(request: Request):
+    try:
+        body = await request.json() if await request.body() else {}
+        return do_action(body)
+    except Exception as e:
+        return JSONResponse({'ok': False, 'error': repr(e)}, status_code=400)
 
 
 if __name__ == '__main__':
-    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    import uvicorn
     print(f'serving on http://{BIND}:{PORT}')
-    srv.serve_forever()
+    uvicorn.run(app, host=BIND, port=PORT, log_level='warning')
