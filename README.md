@@ -70,4 +70,6 @@ curl -X POST http://localhost:8080/api/action -d '{"action":"pause"}'   # resume
 ## 주의
 - 진행 중 학습을 중단하는 버튼은 의도적으로 없음 (실수 방지) — 중단은 터미널에서.
 - 서버 재부팅 시 러너/서버/진행 중 학습 모두 죽음 → 부팅 후 `bash start_ui.sh` 재실행.
+  서버 crontab에 `@reboot ... start_ui.sh boot` 등록하면 자동 복구 — boot 모드는 큐를 **일시정지**로 올리므로
+  재부팅으로 죽은 학습을 확인하고 UI에서 재개하면 된다.
 - 로그 파싱 정규식(`qlib.parse_training_log`)은 `Epoch N | val mIoU=...` 형식 기준 — 다른 로그 포맷이면 수정 필요.
