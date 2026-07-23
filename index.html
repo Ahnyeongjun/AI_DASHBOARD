@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>AI 학습 큐</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1419; color: #d8dee6; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 8px 0 16px; }
+  h2 { font-size: 14px; color: #8fa1b3; margin: 20px 0 8px; text-transform: uppercase; letter-spacing: .05em; }
+  .card { background: #1a2028; border: 1px solid #2a3442; border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #2a3442; }
+  th { color: #8fa1b3; font-weight: 600; }
+  .bar { background: #2a3442; border-radius: 4px; height: 10px; overflow: hidden; min-width: 80px; }
+  .bar > div { height: 100%; background: #4a9eda; }
+  .bar.hot > div { background: #e0704a; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .pill.run { background: #1d4a2c; color: #6fdc8f; }
+  .pill.wait { background: #4a3a1d; color: #dcbd6f; }
+  .pill.pause { background: #4a1d1d; color: #dc6f6f; }
+  .pill.idle { background: #2a3442; color: #8fa1b3; }
+  button { background: #2a3442; color: #d8dee6; border: 1px solid #3a4a5c; border-radius: 5px; padding: 3px 9px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #3a4a5c; }
+  button.warn { border-color: #7a4a3a; }
+  input { background: #10151c; color: #d8dee6; border: 1px solid #3a4a5c; border-radius: 5px; padding: 5px 8px; font-size: 13px; }
+  canvas { width: 100%; height: 220px; }
+  .muted { color: #6b7a8c; font-size: 12px; }
+  .kv { font-size: 13px; } .kv b { color: #fff; }
+  #err { color: #dc6f6f; font-size: 12px; min-height: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>AI 학습 큐 대시보드 <span id="runnerPill" class="pill idle">…</span></h1>
+
+  <h2>GPU</h2>
+  <div class="card"><table id="gpuTable"><thead>
+    <tr><th>GPU</th><th>메모리</th><th></th><th>Util</th></tr></thead><tbody></tbody></table>
+    <div class="muted">러너가 사용하는 GPU는 DASH_GPUS 설정 참고</div>
+  </div>
+
+  <h2>진행 중</h2>
+  <div id="runningBox"></div>
+
+  <h2>대기 큐</h2>
+  <div class="card">
+    <div style="margin-bottom:8px">
+      <button id="pauseBtn"></button>
+      <span class="muted">일시정지 시 진행 중 학습은 유지, 다음 학습만 시작 안 함</span>
+    </div>
+    <table id="queueTable"><thead>
+      <tr><th>#</th><th>실험</th><th>config</th><th style="width:130px"></th></tr></thead><tbody></tbody></table>
+    <div style="margin-top:10px">
+      <input id="addNum" type="number" placeholder="번호 (예: 70)" style="width:110px">
+      <input id="addCfg" type="text" placeholder="configs/train_70_xxx.json" style="width:340px">
+      <button onclick="addItem()">큐에 추가</button>
+      <div id="err"></div>
+    </div>
+  </div>
+
+  <h2>히스토리 (러너 실행분)</h2>
+  <div class="card"><table id="histTable"><thead>
+    <tr><th>실험</th><th>config</th><th>종료</th><th>exit</th></tr></thead><tbody></tbody></table></div>
+
+  <div class="muted">5초마다 자동 갱신 · 서버 재부팅 시 러너/서버 재시작 필요 (queue_ui/start_ui.sh)</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let paused = false;
+
+async function api(action, extra) {
+  const r = await fetch('/api/action', {method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(Object.assign({action}, extra))});
+  const j = await r.json();
+  $('#err').textContent = j.ok ? '' : (j.error || 'error');
+  refresh();
+}
+function addItem() {
+  const num = $('#addNum').value, cfg = $('#addCfg').value;
+  if (!num || !cfg) { $('#err').textContent = '번호와 config 경로를 입력하세요'; return; }
+  api('add', {num, config: cfg});
+}
+
+function drawChart(cv, log) {
+  const ctx = cv.getContext('2d');
+  const W = cv.width = cv.clientWidth * 2, H = cv.height = cv.clientHeight * 2;
+  ctx.clearRect(0, 0, W, H);
+  const eps = log.epochs; if (!eps || eps.length < 2) return;
+  const series = [[log.miou7, '#4a9eda'], [log.miou6, '#6fdc8f']];
+  const all = log.miou7.concat(log.miou6.filter(v => v != null));
+  const ymin = Math.max(0, Math.min(...all) - 0.02), ymax = Math.max(...all) + 0.02;
+  const xmax = log.max_epochs || eps[eps.length - 1];
+  const px = e => 40 + (W - 60) * e / xmax;
+  const py = v => H - 30 - (H - 50) * (v - ymin) / (ymax - ymin);
+  ctx.strokeStyle = '#2a3442'; ctx.fillStyle = '#8fa1b3'; ctx.font = '20px sans-serif';
+  for (let i = 0; i <= 4; i++) {
+    const v = ymin + (ymax - ymin) * i / 4, y = py(v);
+    ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(W - 20, y); ctx.stroke();
+    ctx.fillText(v.toFixed(3), 2, y + 6);
+  }
+  for (const [vals, color] of series) {
+    ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.beginPath();
+    let started = false;
+    eps.forEach((e, i) => {
+      if (vals[i] == null) return;
+      const x = px(e), y = py(vals[i]);
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y); started = true;
+    });
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#4a9eda'; ctx.fillText('7cls', W - 150, 24);
+  ctx.fillStyle = '#6fdc8f'; ctx.fillText('6cls_ndvi', W - 100, 24);
+}
+
+async function refresh() {
+  let s;
+  try { s = await (await fetch('/api/status')).json(); }
+  catch (e) { $('#runnerPill').textContent = '서버 응답 없음'; $('#runnerPill').className = 'pill pause'; return; }
+  paused = s.paused;
+
+  const st = s.runner.alive ? (s.paused ? 'paused' : (s.runner.status || 'idle')) : 'runner 죽음';
+  const cls = {running: 'run', waiting_gpu: 'wait', paused: 'pause', idle: 'idle'}[st] || 'pause';
+  const label = {running: '실행 중', waiting_gpu: 'GPU 대기', paused: '일시정지', idle: '큐 비었음'}[st] || st;
+  $('#runnerPill').textContent = '러너: ' + label;
+  $('#runnerPill').className = 'pill ' + cls;
+  $('#pauseBtn').textContent = s.paused ? '▶ 재개' : '⏸ 일시정지';
+  $('#pauseBtn').onclick = () => api(s.paused ? 'resume' : 'pause');
+
+  $('#gpuTable tbody').innerHTML = s.gpus.map(g => {
+    const p = Math.round(100 * g.mem_used / g.mem_total);
+    return `<tr><td>${g.index}</td><td>${(g.mem_used/1024).toFixed(1)} / ${(g.mem_total/1024).toFixed(1)} GB</td>
+      <td><div class="bar ${p>90?'hot':''}"><div style="width:${p}%"></div></div></td><td>${g.util}%</td></tr>`;
+  }).join('');
+
+  const box = $('#runningBox');
+  if (!s.running.length) {
+    box.innerHTML = '<div class="card muted">실행 중인 학습 없음</div>';
+  } else {
+    box.innerHTML = s.running.map((r, i) => {
+      const l = r.log || {};
+      const ep = l.epochs && l.epochs.length ? l.epochs[l.epochs.length-1] : '?';
+      const cur7 = l.miou7 && l.miou7.length ? l.miou7[l.miou7.length-1].toFixed(4) : '-';
+      const cur6l = l.miou6 ? l.miou6.filter(v=>v!=null) : [];
+      const cur6 = cur6l.length ? cur6l[cur6l.length-1].toFixed(4) : '-';
+      return `<div class="card">
+        <div class="kv"><b>training_${r.num}</b> (PID ${r.pid}) —
+          epoch <b>${ep}${l.max_epochs ? ' / ' + l.max_epochs : ''}</b> ·
+          7cls <b>${cur7}</b> · 6cls_ndvi <b>${cur6}</b> ·
+          best <b>${l.best != null ? l.best.toFixed(4) + ' (ep' + l.best_epoch + ')' : '-'}</b></div>
+        <canvas id="chart${i}"></canvas></div>`;
+    }).join('');
+    s.running.forEach((r, i) => { if (r.log) drawChart($('#chart' + i), r.log); });
+  }
+
+  $('#queueTable tbody').innerHTML = s.queue.map((it, i) => `<tr>
+    <td>${i + 1}</td><td><b>training_${it.num}</b></td><td class="muted">${it.config}</td>
+    <td><button onclick="api('move_up',{index:${i}})">▲</button>
+        <button onclick="api('move_down',{index:${i}})">▼</button>
+        <button class="warn" onclick="if(confirm('training_${it.num} 큐에서 제거?'))api('remove',{index:${i}})">✕</button></td></tr>`
+  ).join('') || '<tr><td colspan="4" class="muted">큐 비어있음</td></tr>';
+
+  $('#histTable tbody').innerHTML = (s.history || []).slice().reverse().map(h => `<tr>
+    <td>training_${h.num}</td><td class="muted">${h.config}</td>
+    <td>${new Date(h.ended * 1000).toLocaleString('ko-KR')}</td>
+    <td>${h.exit_code === 0 ? '0 ✅' : h.exit_code + ' ❌'}</td></tr>`
+  ).join('') || '<tr><td colspan="4" class="muted">없음</td></tr>';
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

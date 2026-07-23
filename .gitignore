@@ -1,0 +1,7 @@
+# 런타임 상태 / 서버 전용 설정
+queue.json
+runner_state.json
+.queue.lock
+*.log
+start_ui.sh
+__pycache__/
