@@ -4,4 +4,5 @@ runner_state.json
 .queue.lock
 *.log
 start_ui.sh
+tunnel/servers.json
 __pycache__/

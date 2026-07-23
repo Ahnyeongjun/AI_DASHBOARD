@@ -41,22 +41,24 @@ bash start_ui.sh        # 러너 + 서버 시작 (재부팅 후에도 이거 한
 | `DASH_PORT` | `8080` | 웹 서버 포트 |
 | `DASH_BIND` | `127.0.0.1` | 바인드 주소. LAN 공개 시 `0.0.0.0` (인증 없음 — 신뢰망에서만) |
 
-## 접속
-기본은 localhost 바인딩이라 SSH 포트포워딩으로 접속:
-```bash
-ssh -L 8080:localhost:8080 user@<서버>
-# 브라우저에서 http://localhost:8080
-```
+## 접속 — SSH 자동 포트포워딩 (`tunnel/`)
+서버는 localhost 바인딩이므로 로컬 PC에서 터널을 연다. `tunnel/tunnel.py`가 이를 자동화한다:
+**서버 목록(servers.json)에 주소를 추가하면 터널이 자동으로 열리고, 끊기면 자동 재접속**한다.
 
-매번 `-L` 치기 귀찮으면 로컬 PC의 `~/.ssh/config`에 저장해두면 **접속만 해도 자동 포워딩**된다:
+```bash
+cd tunnel
+cp servers.example.json servers.json   # 서버 주소/포트 작성 (gitignore됨)
+python tunnel.py                       # 이후 브라우저에서 http://localhost:8080
 ```
-Host gpu-server
-    HostName <서버IP>
-    User <계정>
-    LocalForward 8080 localhost:8080
-```
-이후 `ssh gpu-server`만 하면 http://localhost:8080 이 바로 열린다.
-(VS Code Remote-SSH 사용 시엔 포트가 자동 포워딩되므로 설정 불필요)
+- 전제: 대상 서버에 **SSH 키 인증** 설정 (`ssh-copy-id user@서버` 한 번)
+- `servers.json`은 실행 중 수정해도 됨 — 5초 내 반영 (추가/삭제/enabled 토글)
+- 서버 여러 대면 `servers` 배열에 항목 추가, local 포트만 다르게 (8080, 8081, ...)
+
+### 부팅 시 자동 시작 (로컬 PC)
+- **Windows**: `Win+R` → `shell:startup` → 바로가기 생성, 대상: `pythonw.exe C:\...\tunnel\tunnel.py`
+- **macOS/Linux**: `crontab -e` → `@reboot python3 /path/to/tunnel/tunnel.py >> /tmp/tunnel.log 2>&1`
+- 수동 대안: `~/.ssh/config`에 `LocalForward 8080 localhost:8080` 등록 시 일반 ssh 접속만으로도 포워딩됨
+  (VS Code Remote-SSH는 포트 자동 포워딩이라 설정 불필요)
 
 ## 큐 API
 ```bash

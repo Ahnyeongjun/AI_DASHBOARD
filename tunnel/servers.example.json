@@ -1,0 +1,14 @@
+{
+  "servers": [
+    {
+      "name": "gpu-server",
+      "host": "<서버IP>",
+      "user": "<계정>",
+      "port": 22,
+      "enabled": true,
+      "forwards": [
+        {"local": 8080, "remote": 8080}
+      ]
+    }
+  ]
+}
