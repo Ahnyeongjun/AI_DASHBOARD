@@ -76,8 +76,29 @@
         <div class="field"><label>원격 포트</label><input id="fRemote" type="number" placeholder="(로컬과 동일)" style="width:110px"></div>
         <div class="field" id="fPasswordField"><label>비밀번호 (선택)</label><input id="fPassword" type="password" placeholder="SSH 키 대신 사용" style="width:150px"></div>
       </div>
+      <div class="field" id="fInstallToggle" style="display:block; margin-bottom:6px;">
+        <label style="display:inline; color:#d8dee6;">
+          <input type="checkbox" id="fInstall" onchange="toggleInstallFields()"> 이 서버에 대시보드 자동 설치 (SSH로 코드 업로드 + 실행까지)
+        </label>
+      </div>
+      <div id="fInstallFields" style="display:none;">
+        <div class="field"><label>설치 방식</label>
+          <select id="fMethod" style="background:#10151c; color:#d8dee6; border:1px solid #3a4a5c; border-radius:5px; padding:5px 8px; font-size:13px;">
+            <option value="auto">자동 감지 (pip 우선, 없으면 Docker)</option>
+            <option value="pip">pip 강제</option>
+            <option value="docker">Docker 강제</option>
+          </select>
+        </div>
+        <div class="field"><label>원격 설치 경로</label><input id="fRemoteDir" placeholder="ai_dashboard" style="width:150px"></div>
+        <div class="field"><label>DASH_CODE_DIR</label><input id="fCodeDir" placeholder="/path/to/train_code" style="width:180px"></div>
+        <div class="field"><label>DASH_EXP_DIR</label><input id="fExpDir" placeholder="/path/to/experiments" style="width:180px"></div>
+        <div class="field"><label>DASH_TORCHRUN</label><input id="fTorchrun" placeholder="torchrun" style="width:140px"></div>
+        <div class="field"><label>DASH_GPUS</label><input id="fGpus" placeholder="0,1,2" style="width:100px"></div>
+        <div class="muted">원격에 pip/Docker 둘 다 없으면 설치가 실패하니, 최소 하나는 미리 설치돼 있어야 함.</div>
+      </div>
       <button onclick="addServer()">추가</button>
       <div id="err"></div>
+      <div id="installStatus" class="muted"></div>
       <div class="muted" id="addHint">대상 서버에 SSH 키 인증이 설정돼 있어야 함 (ssh-copy-id). 등록 후 5초 내 자동 연결.</div>
       <div class="muted">비밀번호를 입력하면 SSH 키 대신 그 비밀번호로 접속 — servers.json에 평문 저장되니 신뢰 가능한 개인 PC에서만 사용.</div>
     </div>
@@ -86,7 +107,7 @@
 
 <script>
 const $ = s => document.querySelector(s);
-let selectedPort = null;   // 대시보드 탭에서 보고 있는 로컬 포트
+let selectedIdx = null;    // 대시보드 탭에서 보고 있는 서버 idx (프록시 경로 /dash/{idx}/ 기준)
 let userPicked = false;    // 사용자가 직접 서버를 선택했는지 (자동 전환 방지)
 
 function showTab(name) {
@@ -107,13 +128,20 @@ function toggleLocalFields() {
   ['fHost', 'fUser', 'fPort', 'fRemote', 'fPassword'].forEach(id => { $('#' + id).disabled = isLocal; });
   $('#fLocalLabel').textContent = isLocal ? '포트' : '로컬 포트';
   $('#fPasswordField').style.display = isLocal ? 'none' : 'inline-block';
+  $('#fInstallToggle').style.display = isLocal ? 'none' : 'block';
+  if (isLocal) { $('#fInstall').checked = false; toggleInstallFields(); }
   $('#addHint').textContent = isLocal
     ? '이 PC에서 직접 도는 대시보드 포트를 등록 — SSH/터널 없이 바로 접근.'
     : '대상 서버에 SSH 키 인증이 설정돼 있어야 함 (ssh-copy-id). 등록 후 5초 내 자동 연결.';
 }
 
+function toggleInstallFields() {
+  $('#fInstallFields').style.display = $('#fInstall').checked ? 'block' : 'none';
+}
+
 async function addServer() {
   const isLocal = $('#fIsLocal').checked;
+  const doInstall = !isLocal && $('#fInstall').checked;
   const body = isLocal
     ? {name: $('#fName').value, is_local: true, local: $('#fLocal').value}
     : {name: $('#fName').value, host: $('#fHost').value, user: $('#fUser').value,
@@ -123,8 +151,30 @@ async function addServer() {
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   const j = await r.json();
   $('#err').textContent = j.ok ? '' : (j.error || 'error');
-  if (j.ok) { ['fName','fHost','fUser','fPort','fLocal','fRemote','fPassword'].forEach(id => $('#' + id).value = ''); }
+  if (!j.ok) return;
+
+  ['fName','fHost','fUser','fPort','fLocal','fRemote','fPassword'].forEach(id => $('#' + id).value = '');
   refresh();
+
+  if (doInstall) {
+    $('#installStatus').textContent = '설치 중... (pip install 또는 docker build라 몇 분 걸릴 수 있음)';
+    const installBody = {
+      method: $('#fMethod').value, remote_dir: $('#fRemoteDir').value,
+      DASH_CODE_DIR: $('#fCodeDir').value, DASH_EXP_DIR: $('#fExpDir').value,
+      DASH_TORCHRUN: $('#fTorchrun').value, DASH_GPUS: $('#fGpus').value,
+    };
+    try {
+      const ir = await fetch(`/api/servers/${j.idx}/install`, {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify(installBody)});
+      const ij = await ir.json();
+      $('#installStatus').textContent = ij.ok
+        ? `설치 완료 (${ij.method}): ${ij.message}`
+        : `설치 실패: ${ij.error || ij.message || 'error'}`;
+    } catch (e) {
+      $('#installStatus').textContent = `설치 요청 실패: ${e}`;
+    }
+    refresh();
+  }
 }
 
 async function toggleServer(idx) {
@@ -138,21 +188,20 @@ async function removeServer(idx, name) {
   refresh();
 }
 
-function pickDashboard(port) {
-  selectedPort = port;
+function pickDashboard(idx) {
+  selectedIdx = idx;
   userPicked = true;
   renderDashFrame();
 }
 
 function renderDashFrame() {
   const frame = $('#dashFrame');
-  if (selectedPort) {
+  if (selectedIdx !== null) {
     frame.style.display = '';
     $('#dashEmpty').style.display = 'none';
-    const wantSrc = `http://localhost:${selectedPort}/`;
-    if (frame.dataset.port !== String(selectedPort)) {
-      frame.src = wantSrc;
-      frame.dataset.port = String(selectedPort);
+    if (frame.dataset.idx !== String(selectedIdx)) {
+      frame.src = `/dash/${selectedIdx}/`;
+      frame.dataset.idx = String(selectedIdx);
     }
   } else {
     frame.style.display = 'none';
@@ -172,7 +221,10 @@ async function refresh() {
       const t = s.tunnels[key];
       let pill;
       if (!srv.enabled) pill = '<span class="pill off">꺼짐</span>';
-      else if (t && t.alive) { pill = '<span class="pill up">연결됨</span>'; aliveServers.push({name: srv.name, port: f.local}); }
+      else if (t && t.alive) {
+        pill = '<span class="pill up">연결됨</span>';
+        if (!aliveServers.some(a => a.idx === srv.idx)) aliveServers.push({name: srv.name, idx: srv.idx});
+      }
       else if (t) pill = srv.local ? '<span class="pill down">응답 없음</span>' : `<span class="pill down">재시도 ${t.retry_in}s</span>`;
       else pill = '<span class="pill down">대기</span>';
       const label = srv.local ? `포트 ${f.local}` : `L${f.local} → ${f.remote}`;
@@ -190,13 +242,13 @@ async function refresh() {
   }).join('') || '<tr><td colspan="4" class="muted">등록된 서버 없음</td></tr>';
 
   // 대시보드 탭: 연결된 서버 선택 바
-  const stillAlive = aliveServers.some(a => a.port === selectedPort);
-  if (!stillAlive) { selectedPort = null; userPicked = false; }
-  if (!userPicked && !selectedPort && aliveServers.length) { selectedPort = aliveServers[0].port; }
+  const stillAlive = aliveServers.some(a => a.idx === selectedIdx);
+  if (!stillAlive) { selectedIdx = null; userPicked = false; }
+  if (!userPicked && selectedIdx === null && aliveServers.length) { selectedIdx = aliveServers[0].idx; }
 
   $('#dashServerBar').innerHTML = aliveServers.length
-    ? aliveServers.map(a => `<button class="srv ${a.port === selectedPort ? 'active' : ''}"
-        onclick="pickDashboard(${a.port})">${a.name} <span class="muted">:${a.port}</span></button>`).join(' ')
+    ? aliveServers.map(a => `<button class="srv ${a.idx === selectedIdx ? 'active' : ''}"
+        onclick="pickDashboard(${a.idx})">${a.name}</button>`).join(' ')
     : '<span class="muted">연결된 서버 없음</span>';
 
   renderDashFrame();

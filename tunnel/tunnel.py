@@ -10,7 +10,12 @@ servers.json의 서버 목록을 5초마다 읽어:
 
 같은 프로세스에서 FastAPI 웹 UI(TUNNEL_UI_PORT, 기본 8090)를 띄워
 브라우저로 서버 등록/삭제/활성화 토글 + 연결 상태 확인 + 등록된 서버의 대시보드를 한 화면(iframe)에서 볼 수 있다.
+iframe은 /dash/{idx}/* 로 이 프로세스가 대상 로컬 포트로 리버스 프록시하므로, 사용자는 이 포트(8090) 하나만
+열면 되고 실제 대시보드가 어느 포트에 떠 있는지는 주소창/네트워크 탭에도 노출되지 않는다.
 UI에서 등록하면 servers.json에 반영되고, 원격 서버는 위 모니터 루프가 5초 내 자동으로 터널을 연다.
+
+원격 서버 등록 시 "자동 설치"를 선택하면 SSH로 접속해 대시보드 코드를 올리고(pip 또는 Docker,
+원격에 있는 걸 자동 감지) 바로 실행까지 한다 — GPU 서버에 미리 수동으로 코드를 배포해둘 필요가 없다.
 
 주의: 비밀번호는 servers.json에 평문으로 저장됨 (gitignore되지만 로컬 디스크 파일 — 이 PC에 접근 가능한
 사람에게는 노출됨). 가능하면 SSH 키 인증을 쓰고, 비밀번호는 키를 못 쓰는 경우의 대안으로만 사용할 것.
@@ -33,9 +38,10 @@ import sys
 import threading
 import time
 
+import httpx
 import paramiko
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 # 출력이 파이프/파일로 리다이렉트되면(nohup 등) Windows에서 시스템 코드페이지(cp949 등)로
 # 기본 인코딩되어 —/→ 같은 문자에서 UnicodeEncodeError가 남 — UTF-8로 고정.
@@ -226,6 +232,87 @@ def stop_password_tunnel(entry):
         pass
 
 
+REPO_ROOT = os.path.dirname(BASE)          # tunnel/ 의 상위 = 프로젝트 루트
+DASHBOARD_FILES = ['qlib.py', 'runner.py', 'server.py', 'index.html', 'requirements.txt']
+DOCKER_FILES = DASHBOARD_FILES + ['Dockerfile', 'entrypoint.sh']
+
+
+def ssh_client_for(s):
+    """등록된 서버 dict로 인증된 paramiko SSHClient 연결 (비밀번호 있으면 비밀번호, 없으면 키)."""
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    kwargs = dict(hostname=s['host'], port=s.get('port', 22), username=s.get('user') or None,
+                  timeout=10, banner_timeout=10, auth_timeout=10)
+    if s.get('password'):
+        kwargs.update(password=s['password'], look_for_keys=False, allow_agent=False)
+    client.connect(**kwargs)
+    return client
+
+
+def ssh_exec(client, cmd, timeout=120):
+    _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+    rc = stdout.channel.recv_exit_status()
+    return rc, stdout.read().decode(errors='replace'), stderr.read().decode(errors='replace')
+
+
+def ssh_exec_detached(client, cmd, timeout=20):
+    """백그라운드(&)로 데몬을 띄우는 커맨드 전용 — 실행 후에도 채널의 stdout/stderr가 계속 열려있어서
+    (redirect/nohup을 걸어도 자식 프로세스가 세션을 물고 있음) .read()를 호출하면 영원히 블록된다.
+    exit-status만 받고 스트림은 읽지 않는다."""
+    _, stdout, _ = client.exec_command(cmd, timeout=timeout)
+    return stdout.channel.recv_exit_status()
+
+
+def detect_remote_tooling(client):
+    rc_docker, *_ = ssh_exec(client, 'command -v docker', timeout=15)
+    rc_pip, *_ = ssh_exec(client, 'command -v pip3 || command -v pip', timeout=15)
+    return {'docker': rc_docker == 0, 'pip': rc_pip == 0}
+
+
+def upload_files(client, filenames, remote_dir):
+    sftp = client.open_sftp()
+    try:
+        ssh_exec(client, f'mkdir -p {remote_dir}', timeout=15)
+        for name in filenames:
+            sftp.put(os.path.join(REPO_ROOT, name), f'{remote_dir}/{name}')
+    finally:
+        sftp.close()
+
+
+def install_via_pip(client, remote_dir, env):
+    upload_files(client, DASHBOARD_FILES, remote_dir)
+    rc, out, err = ssh_exec(
+        client, f'cd {remote_dir} && (pip3 install -r requirements.txt || pip install -r requirements.txt)',
+        timeout=180)
+    if rc != 0:
+        return False, f'pip install 실패: {(err or out).strip()[-500:]}'
+    env_prefix = ' '.join(f'{k}={v}' for k, v in env.items() if v)
+    # 각 커맨드를 서브셸로 감싸야 함 — 'cd x && a & b & sleep 1'은 &&가 a에만 걸리고
+    # b는 cd 안 된 원래 디렉토리에서 실행돼버림 (쉘 파싱 우선순위 문제).
+    start_cmd = (
+        f'(cd {remote_dir} && {env_prefix} nohup python3 runner.py >> runner_stdout.log 2>&1 < /dev/null &) ; '
+        f'(cd {remote_dir} && {env_prefix} nohup python3 server.py >> server_stdout.log 2>&1 < /dev/null &) ; '
+        f'sleep 1'
+    )
+    ssh_exec_detached(client, start_cmd, timeout=20)
+    return True, 'pip 설치 및 실행 완료'
+
+
+def install_via_docker(client, remote_dir, env):
+    upload_files(client, DOCKER_FILES, remote_dir)
+    rc, out, err = ssh_exec(client, f'cd {remote_dir} && docker build -t ai-dashboard .', timeout=300)
+    if rc != 0:
+        return False, f'docker build 실패: {(err or out).strip()[-500:]}'
+    port = env.get('DASH_PORT') or '8080'
+    env_flags = ' '.join(f'-e {k}={v}' for k, v in env.items() if v)
+    run_cmd = (f'docker rm -f ai-dashboard >/dev/null 2>&1; '
+               f'docker run -d --name ai-dashboard -p 127.0.0.1:{port}:8080 {env_flags} ai-dashboard')
+    rc, out, err = ssh_exec(client, run_cmd, timeout=60)
+    if rc != 0:
+        return False, f'docker run 실패: {(err or out).strip()[-500:]}'
+    return True, 'Docker 빌드 및 실행 완료'
+
+
 def monitor_loop():
     procs = {}          # key -> Popen (SSH 키 인증 터널)
     next_retry = {}     # key -> timestamp
@@ -307,6 +394,37 @@ def ui_index():
     return FileResponse(UI_INDEX, media_type='text/html; charset=utf-8')
 
 
+_PROXY_EXCLUDED_REQUEST_HEADERS = {'host', 'content-length'}
+_PROXY_EXCLUDED_RESPONSE_HEADERS = {'content-length', 'transfer-encoding', 'content-encoding', 'connection'}
+
+
+@app.api_route('/dash/{idx}', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+@app.api_route('/dash/{idx}/{path:path}', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+async def dash_proxy(idx: int, request: Request, path: str = ''):
+    """등록된 서버의 대시보드를 이 프로세스(8090) 경유로 중계 — iframe이 다른 포트를 직접 가리키지 않게 함."""
+    cfg = read_servers() or {'servers': []}
+    servers = cfg.get('servers', [])
+    if not 0 <= idx < len(servers):
+        return JSONResponse({'error': 'index out of range'}, status_code=404)
+    forwards = servers[idx].get('forwards', [])
+    if not forwards:
+        return JSONResponse({'error': 'no forward configured for this server'}, status_code=404)
+    port = forwards[0]['local']
+    url = f"http://127.0.0.1:{port}/{path}"
+    body = await request.body()
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_EXCLUDED_REQUEST_HEADERS}
+    try:
+        async with httpx.AsyncClient() as client:
+            upstream = await client.request(
+                request.method, url, params=request.query_params,
+                content=body, headers=headers, timeout=15)
+    except httpx.RequestError as e:
+        return JSONResponse({'error': f'대시보드에 연결할 수 없음: {e!r}'}, status_code=502)
+    resp_headers = {k: v for k, v in upstream.headers.items()
+                    if k.lower() not in _PROXY_EXCLUDED_RESPONSE_HEADERS}
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=resp_headers)
+
+
 @app.get('/api/status')
 def api_status():
     cfg = read_servers() or {'servers': []}
@@ -335,7 +453,8 @@ async def add_server(body: dict):
         if not port:
             return JSONResponse({'ok': False, 'error': '포트는 필수'}, status_code=400)
         cfg = read_servers() or {'servers': []}
-        cfg.setdefault('servers', []).append({
+        servers = cfg.setdefault('servers', [])
+        servers.append({
             'name': (body.get('name') or '').strip() or f'local:{port}',
             'host': '127.0.0.1',
             'local': True,
@@ -343,7 +462,7 @@ async def add_server(body: dict):
             'forwards': [{'local': port, 'remote': port}],
         })
         write_servers(cfg)
-        return {'ok': True}
+        return {'ok': True, 'idx': len(servers) - 1}
 
     host = (body.get('host') or '').strip()
     local = body.get('local')
@@ -367,9 +486,10 @@ async def add_server(body: dict):
     if password:
         entry['password'] = password
     cfg = read_servers() or {'servers': []}
-    cfg.setdefault('servers', []).append(entry)
+    servers = cfg.setdefault('servers', [])
+    servers.append(entry)
     write_servers(cfg)
-    return {'ok': True}
+    return {'ok': True, 'idx': len(servers) - 1}
 
 
 @app.delete('/api/servers/{idx}')
@@ -392,6 +512,55 @@ def toggle_server(idx: int):
     servers[idx]['enabled'] = not servers[idx].get('enabled', True)
     write_servers(cfg)
     return {'ok': True, 'enabled': servers[idx]['enabled']}
+
+
+@app.post('/api/servers/{idx}/install')
+def install_server(idx: int, body: dict):
+    """등록된 원격 서버에 SSH로 접속해 대시보드 코드를 올리고(pip 또는 Docker) 실행까지 한다."""
+    cfg = read_servers() or {'servers': []}
+    servers = cfg.get('servers', [])
+    if not 0 <= idx < len(servers):
+        return JSONResponse({'ok': False, 'error': 'index out of range'}, status_code=400)
+    s = servers[idx]
+    if s.get('local'):
+        return JSONResponse({'ok': False, 'error': '로컬 서버는 자동 설치 대상이 아님'}, status_code=400)
+
+    remote_dir = (body.get('remote_dir') or 'ai_dashboard').strip()
+    remote_port = s['forwards'][0]['remote'] if s.get('forwards') else 8080
+    env = {
+        'DASH_CODE_DIR': (body.get('DASH_CODE_DIR') or '').strip(),
+        'DASH_EXP_DIR': (body.get('DASH_EXP_DIR') or '').strip(),
+        'DASH_TORCHRUN': (body.get('DASH_TORCHRUN') or '').strip(),
+        'DASH_GPUS': (body.get('DASH_GPUS') or '').strip(),
+        'DASH_PORT': str(remote_port),
+    }
+
+    try:
+        client = ssh_client_for(s)
+    except Exception as e:
+        return JSONResponse({'ok': False, 'error': f'SSH 접속 실패: {e!r}'}, status_code=502)
+
+    try:
+        avail = detect_remote_tooling(client)
+        method = (body.get('method') or 'auto').strip()
+        if method == 'auto':
+            method = 'pip' if avail['pip'] else ('docker' if avail['docker'] else None)
+        if method is None:
+            return JSONResponse({'ok': False, 'error': '원격에 pip/docker 둘 다 없음 — 수동 설치 필요'},
+                                 status_code=400)
+        if method not in ('pip', 'docker'):
+            return JSONResponse({'ok': False, 'error': f'알 수 없는 method: {method}'}, status_code=400)
+        if not avail[method]:
+            return JSONResponse({'ok': False, 'error': f'원격에 {method} 없음 (감지: {avail})'}, status_code=400)
+
+        installer = install_via_pip if method == 'pip' else install_via_docker
+        ok, message = installer(client, remote_dir, env)
+    except Exception as e:
+        return JSONResponse({'ok': False, 'error': f'설치 중 오류: {e!r}'}, status_code=500)
+    finally:
+        client.close()
+
+    return {'ok': ok, 'method': method, 'message': message}
 
 
 def main():

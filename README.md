@@ -67,7 +67,7 @@ GPU 서버 대시보드는 localhost 바인딩이므로 원격 서버는 로컬 
 
 ```bash
 cd tunnel
-pip install -r requirements.txt   # fastapi, uvicorn, paramiko
+pip install -r requirements.txt   # fastapi, uvicorn, paramiko, httpx
 python tunnel.py                  # http://localhost:8090
 ```
 `http://localhost:8090` 접속 → **서버 관리** 탭에서 등록:
@@ -77,9 +77,17 @@ python tunnel.py                  # http://localhost:8090
     단, `servers.json`에 **평문 저장**되므로(gitignore되지만 로컬 디스크 파일) 신뢰 가능한 개인 PC에서만 사용할 것.
 - **이 PC 자체**: "이 PC (로컬)" 체크 후 포트만 입력 — 로컬 PC에 GPU가 있어서 대시보드가 이미 `localhost:포트`에
   떠 있는 경우, SSH/터널 없이 포트 응답만 주기적으로 확인해서 연결 상태를 표시.
+- **자동 설치**: 원격 서버 등록 시 "이 서버에 대시보드 자동 설치" 체크 → SSH로 접속해 코드를 올리고
+  (`qlib.py`/`runner.py`/`server.py`/`index.html`/`requirements.txt`) 바로 실행까지 한다.
+  GPU 서버에 미리 수동으로 코드를 배포해둘 필요가 없다. 설치 방식은 **pip**(SFTP 업로드 + `pip install` +
+  `nohup`으로 백그라운드 실행) 또는 **Docker**(업로드 후 `docker build` + `docker run`) 중 자동 감지하거나
+  직접 선택 가능 — 원격에 pip/Docker 둘 다 없으면 실패하니 최소 하나는 미리 있어야 함.
+  `DASH_CODE_DIR`/`DASH_EXP_DIR`/`DASH_TORCHRUN`/`DASH_GPUS`도 이때 같이 입력.
 
 **대시보드** 탭에서는 연결된(원격이든 로컬이든) 서버를 버튼으로 골라 그 학습 큐 대시보드를 iframe으로 바로 볼 수 있다
-— 서버마다 브라우저 탭을 따로 열 필요 없음.
+— 서버마다 브라우저 탭을 따로 열 필요 없음. iframe은 실제 대시보드 포트를 직접 가리키지 않고
+`tunnel.py`가 `/dash/{서버idx}/*`로 리버스 프록시하므로, 브라우저 주소창/네트워크 탭에도 8090 하나만 보인다
+— 사용자가 열어야 하는 포트는 항상 이거 하나.
 
 `servers.json`을 텍스트로 직접 수정해도 되며(UI와 동일 파일, gitignore됨), 여러 대 등록 시 로컬 포트만 겹치지 않게 다르게 설정.
 - 전제(SSH 키 인증 사용 시): 대상 서버에 **SSH 키 인증** 설정 (`ssh-copy-id user@서버` 한 번)

@@ -71,7 +71,7 @@ const $ = s => document.querySelector(s);
 let paused = false;
 
 async function api(action, extra) {
-  const r = await fetch('/api/action', {method: 'POST',
+  const r = await fetch('api/action', {method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(Object.assign({action}, extra))});
   const j = await r.json();
@@ -117,7 +117,7 @@ function drawChart(cv, log) {
 
 async function refresh() {
   let s;
-  try { s = await (await fetch('/api/status')).json(); }
+  try { s = await (await fetch('api/status')).json(); }
   catch (e) { $('#runnerPill').textContent = '서버 응답 없음'; $('#runnerPill').className = 'pill pause'; return; }
   paused = s.paused;
 
